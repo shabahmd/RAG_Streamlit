@@ -38,60 +38,90 @@ def extract_text_from_pdf(uploaded_file):
         text += page.extract_text() + "\n"
     return text
 
-# Function to ask a question to the model
 def def_ask_question(client, model_name, retriever, question):
     try:
         # Get relevant documents from the retriever
         context_docs = retriever.get_relevant_documents(question)
         context = "\n".join([doc.page_content for doc in context_docs])
 
-        # Generate response using Azure OpenAI
-        response = client.complete(
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a helpful assistant"
-                },
-                {
-                    "role": "user", 
-                    "content": f'Based on the following context:\n\n{context}\n\nAnswer this question: {question}'
-                }
-            ],
+        # Create a placeholder for the streaming response
+        message_placeholder = st.empty()
+        full_response = ""
+
+        # Generate response using Azure OpenAI with streaming
+        messages = [
+            {
+                "role": "system", 
+                "content": "You are a helpful assistant"
+            },
+            {
+                "role": "user", 
+                "content": f'Based on the following context:\n\n{context}\n\nAnswer this question: {question}'
+            }
+        ]
+
+        # Stream the response
+        for chunk in client.complete.stream(
+            messages=messages,
             model=model_name,
             temperature=0.3,
             max_tokens=500,
             top_p=1.0
-        )
-
-        # Extract and return the response
-        return response.choices[0].message.content if response.choices else "No response available"
+        ):
+            if chunk.choices[0].delta.content is not None:
+                full_response += chunk.choices[0].delta.content
+                # Update the placeholder with the growing response
+                message_placeholder.markdown(full_response + "▌")
+        
+        # Final update without cursor
+        message_placeholder.markdown(full_response)
+        return full_response
 
     except Exception as e:
         return f"An error occurred: {str(e)}"
 
 # Streamlit app
 st.title("PDF Q&A")
-
-# File upload
 uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
 
-if uploaded_file is not None:
-    # Extract and process the PDF text
-    pdf_text = extract_text_from_pdf(uploaded_file)
-    retriever = create_vector_store(pdf_text)  # Use the cached vector store
-    
-    # Azure client for asking questions
-    client = get_azure_client()
-    
-    # User input for question
-    user_question = st.text_input("Ask your question:")
+# Add a spinner while processing
+with st.spinner('Processing...'):
+    # File upload with clear button
 
-    if user_question:
-        # Generate and display the answer
-        answer = def_ask_question(
-            client=client,
-            model_name=model_name,
-            retriever=retriever,
-            question=user_question
-        )
-        st.write("Answer:", answer)
+    if uploaded_file is not None:
+
+        # Extract and process the PDF text
+        pdf_text = extract_text_from_pdf(uploaded_file)
+        retriever = create_vector_store(pdf_text)  # Use the cached vector store
+        
+        # Azure client for asking questions
+        client = get_azure_client()
+        
+        # Create a chat interface
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+
+        # Display chat history
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # User input using chat_input instead of text_input
+        if prompt := st.chat_input("Ask your question"):
+            # Add user message to chat history
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            # Display user message
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Display assistant response with streaming
+            with st.chat_message("assistant"):
+                answer = def_ask_question(
+                    client=client,
+                    model_name=model_name,
+                    retriever=retriever,
+                    question=prompt
+                )
+                # Add assistant response to chat history
+                st.session_state.messages.append({"role": "assistant", "content": answer})
